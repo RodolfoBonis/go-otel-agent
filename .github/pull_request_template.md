@@ -40,6 +40,14 @@
 - [ ] My changes do not introduce new warnings
 - [ ] I have checked for potential breaking changes
 
+## Release
+
+<!-- Add a release label to trigger automatic versioning on merge: -->
+<!-- - `release:patch` — Bug fixes, small improvements, dependency updates -->
+<!-- - `release:minor` — New features, non-breaking additions -->
+<!-- - `release:major` — Breaking API changes -->
+<!-- If no release label is added, no version will be published. -->
+
 ## Related Issues
 
 <!-- Link any related issues: Closes #123, Fixes #456 -->

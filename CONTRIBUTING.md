@@ -132,12 +132,39 @@ go-otel-agent/
 
 ## Release Process
 
-Releases are automated via GitHub Actions:
+Releases are **fully automated** via GitHub Actions using PR labels. No manual tagging required.
+
+### How It Works
 
 1. All changes go through PRs to `main`
-2. PRs require passing CI (lint + tests)
-3. Maintainers tag releases with semantic versioning: `v0.1.0`, `v0.2.0`, `v1.0.0`
-4. Tags trigger the release workflow which creates a GitHub release and updates the Go module proxy
+2. PRs require passing CI (lint + tests + vulnerability scan)
+3. **Add a release label** to the PR before merging:
+
+| Label | When to use | Example |
+|-------|-------------|---------|
+| `release:patch` | Bug fixes, small improvements, dependency updates | `v0.1.2` -> `v0.1.3` |
+| `release:minor` | New features, non-breaking additions | `v0.1.3` -> `v0.2.0` |
+| `release:major` | Breaking API changes | `v0.2.0` -> `v1.0.0` |
+
+4. When the PR is **merged**, the release workflow automatically:
+   - Resolves the next semantic version from the latest tag
+   - Runs tests one final time
+   - Creates and pushes the new git tag
+   - Creates a GitHub Release with auto-generated notes
+   - Updates the Go module proxy
+
+### No Release Label?
+
+If no `release:*` label is added, **no release is created** on merge. This is useful for documentation-only or CI changes that don't need a new version.
+
+### Manual Fallback
+
+You can still trigger a release by pushing a tag manually:
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
 
 ## Getting Help
 
