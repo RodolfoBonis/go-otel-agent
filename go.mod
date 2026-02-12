@@ -1,8 +1,6 @@
 module github.com/RodolfoBonis/go-otel-agent
 
-go 1.24.1
-
-toolchain go1.24.5
+go 1.24.13
 
 require (
 	github.com/gin-gonic/gin v1.11.0
