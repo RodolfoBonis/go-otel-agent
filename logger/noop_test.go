@@ -8,9 +8,7 @@ import (
 
 func TestNoopLogger_ImplementsLoggerInterface(t *testing.T) {
 	var l Logger = &NoopLogger{}
-	if l == nil {
-		t.Fatal("expected non-nil NoopLogger")
-	}
+	_ = l // compile-time interface check
 }
 
 func TestNoopLogger_DebugDoesNotPanic(t *testing.T) {

@@ -172,7 +172,7 @@ func TestInit_DisabledAgent_SucceedsImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error when disabled, got: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	// Agent should not be running since it was disabled.
 	if agent.IsRunning() {
@@ -188,7 +188,7 @@ func TestInit_FailsWithoutServiceName(t *testing.T) {
 
 	err := agent.Init(context.Background())
 	if err == nil {
-		defer agent.Shutdown(context.Background())
+		defer func() { _ = agent.Shutdown(context.Background()) }()
 		t.Fatal("expected error when service name is missing")
 	}
 
@@ -206,7 +206,7 @@ func TestInit_SucceedsWithValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error with valid config, got: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	if !agent.IsRunning() {
 		t.Error("expected agent to be running after Init")
@@ -226,7 +226,7 @@ func TestInit_SucceedsWithAllSignals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error with all signals enabled, got: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	cfg := agent.Config()
 	if !cfg.Traces.Enabled {
@@ -251,7 +251,7 @@ func TestInit_DoubleInit_ReturnsErrAlreadyInitialized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Init failed: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	err = agent.Init(context.Background())
 	if err == nil {
@@ -315,7 +315,7 @@ func TestGetMeter_ReturnsNoopWhenDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	meter := agent.GetMeter("test")
 	if meter == nil {
@@ -358,7 +358,7 @@ func TestIsRunning_AfterInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	if !agent.IsRunning() {
 		t.Error("expected IsRunning to return true after Init")
@@ -417,7 +417,7 @@ func TestGetTracer_CachesTracers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	tracer1 := agent.GetTracer("my-tracer")
 	tracer2 := agent.GetTracer("my-tracer")
@@ -441,7 +441,7 @@ func TestGetMeter_CachesMeters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	meter1 := agent.GetMeter("my-meter")
 	meter2 := agent.GetMeter("my-meter")
@@ -459,7 +459,7 @@ func TestGetTracer_DifferentNames_ReturnDifferentTracers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	defer agent.Shutdown(context.Background())
+	defer func() { _ = agent.Shutdown(context.Background()) }()
 
 	tracer1 := agent.GetTracer("tracer-a")
 	tracer2 := agent.GetTracer("tracer-b")

@@ -42,7 +42,7 @@ func NewTraceProvider(cfg *config.Config, res *resource.Resource, log logger.Log
 			AttributePerEventCountLimit: cfg.Traces.MaxAttributesPerSpan,
 			AttributePerLinkCountLimit:  cfg.Traces.MaxAttributesPerSpan,
 		}
-		opts = append(opts, sdktrace.WithSpanLimits(limits))
+		opts = append(opts, sdktrace.WithRawSpanLimits(limits))
 	}
 
 	// Add PII scrubbing processor if enabled

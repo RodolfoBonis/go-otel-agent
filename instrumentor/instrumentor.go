@@ -47,7 +47,7 @@ func (i *Instrumentor) TraceFunction(ctx context.Context, fn interface{}, args .
 	fnName := runtime.FuncForPC(fnValue.Pointer()).Name()
 
 	tracer := i.provider.GetTracer("github.com/RodolfoBonis/go-otel-agent/instrumentor")
-	ctx, span := tracer.Start(ctx, fnName)
+	_, span := tracer.Start(ctx, fnName)
 	defer span.End()
 
 	span.SetAttributes(

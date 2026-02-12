@@ -142,7 +142,7 @@ func TestLogger_LogError_WithCustomErrorFields(t *testing.T) {
 
 func TestLogger_ContextWithRequestID(t *testing.T) {
 	l := NewLogger("development")
-	ctx := context.WithValue(context.Background(), "requestID", "req-123")
+	ctx := context.WithValue(context.Background(), RequestIDKey, "req-123")
 
 	// Should not panic and should include requestID in fields
 	l.Info(ctx, "message with request ID")

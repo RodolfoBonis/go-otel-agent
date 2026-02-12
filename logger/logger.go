@@ -12,6 +12,12 @@ import (
 // Fields represents structured log fields.
 type Fields map[string]interface{}
 
+// contextKey is a private type for context keys to avoid collisions.
+type contextKey string
+
+// RequestIDKey is the context key for request IDs.
+const RequestIDKey contextKey = "requestID"
+
 // Logger is a structured logger interface with automatic trace correlation.
 type Logger interface {
 	Debug(ctx context.Context, message string, fields ...Fields)
@@ -124,7 +130,7 @@ func (cl *CustomLogger) zapFields(ctx context.Context, fields ...Fields) []zap.F
 		}
 
 		// Add requestID from context if present
-		if reqID, ok := ctx.Value("requestID").(string); ok && reqID != "" {
+		if reqID, ok := ctx.Value(RequestIDKey).(string); ok && reqID != "" {
 			allFields["requestID"] = reqID
 		}
 	}
