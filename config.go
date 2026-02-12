@@ -24,6 +24,7 @@ type PerformanceConfig = config.PerformanceConfig
 type FeaturesConfig = config.FeaturesConfig
 type RouteExclusionConfig = config.RouteExclusionConfig
 type ScrubConfig = config.ScrubConfig
+type HTTPConfig = config.HTTPConfig
 
 // LoadConfigFromEnv loads configuration from environment variables with smart defaults.
 func LoadConfigFromEnv() *Config {
@@ -53,6 +54,7 @@ func LoadConfigFromEnv() *Config {
 		Features:       loadFeaturesConfig(env),
 		RouteExclusion: loadRouteExclusionConfig(),
 		Scrub:          loadScrubConfig(),
+		HTTP:           loadHTTPConfig(),
 	}
 }
 
@@ -235,10 +237,31 @@ func loadRouteExclusionConfig() RouteExclusionConfig {
 func loadScrubConfig() ScrubConfig {
 	return ScrubConfig{
 		Enabled:              getBoolEnv(false, "OTEL_PII_SCRUB_ENABLED"),
-		SensitiveKeys:        getStringSliceEnv("OTEL_PII_SENSITIVE_KEYS", []string{"user.email", "db.statement"}),
+		SensitiveKeys:        getStringSliceEnv("OTEL_PII_SENSITIVE_KEYS", []string{"password", "token", "secret", "key", "email"}),
 		SensitivePatterns:    getStringSliceEnv("OTEL_PII_SENSITIVE_PATTERNS", []string{".*password.*", ".*token.*", ".*secret.*"}),
 		RedactedValue:        getStringEnv("[REDACTED]", "OTEL_PII_REDACTED_VALUE"),
-		DBStatementMaxLength: getIntEnv("OTEL_PII_DB_STATEMENT_MAX_LENGTH", 256),
+		DBStatementMaxLength: getIntEnv("OTEL_PII_DB_STATEMENT_MAX_LENGTH", 2048),
+	}
+}
+
+func loadHTTPConfig() config.HTTPConfig {
+	return config.HTTPConfig{
+		CaptureRequestHeaders:  getBoolEnv(true, "OTEL_HTTP_CAPTURE_REQUEST_HEADERS"),
+		CaptureResponseHeaders: getBoolEnv(true, "OTEL_HTTP_CAPTURE_RESPONSE_HEADERS"),
+		AllowedRequestHeaders:  getStringSliceEnv("OTEL_HTTP_ALLOWED_REQUEST_HEADERS", nil),
+		AllowedResponseHeaders: getStringSliceEnv("OTEL_HTTP_ALLOWED_RESPONSE_HEADERS", nil),
+		CaptureQueryParams:     getBoolEnv(true, "OTEL_HTTP_CAPTURE_QUERY_PARAMS"),
+		CaptureRequestBody:     getBoolEnv(false, "OTEL_HTTP_CAPTURE_REQUEST_BODY"),
+		CaptureResponseBody:    getBoolEnv(false, "OTEL_HTTP_CAPTURE_RESPONSE_BODY"),
+		RequestBodyMaxSize:     getIntEnv("OTEL_HTTP_REQUEST_BODY_MAX_SIZE", 8192),
+		ResponseBodyMaxSize:    getIntEnv("OTEL_HTTP_RESPONSE_BODY_MAX_SIZE", 8192),
+		BodyAllowedContentTypes: getStringSliceEnv("OTEL_HTTP_BODY_ALLOWED_CONTENT_TYPES", []string{
+			"application/json", "application/xml", "text/plain",
+		}),
+		RecordExceptionEvents: getBoolEnv(true, "OTEL_HTTP_RECORD_EXCEPTION_EVENTS"),
+		SensitiveHeaders: getStringSliceEnv("OTEL_HTTP_SENSITIVE_HEADERS", []string{
+			"authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token",
+		}),
 	}
 }
 

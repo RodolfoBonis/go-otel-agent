@@ -671,6 +671,7 @@ func TestLoadConfigFromEnv_ScrubDefaults(t *testing.T) {
 	t.Setenv("OTEL_PII_SCRUB_ENABLED", "")
 	t.Setenv("OTEL_PII_SENSITIVE_KEYS", "")
 	t.Setenv("OTEL_PII_REDACTED_VALUE", "")
+	t.Setenv("OTEL_PII_DB_STATEMENT_MAX_LENGTH", "")
 
 	cfg := LoadConfigFromEnv()
 	if cfg.Scrub.Enabled {
@@ -679,8 +680,91 @@ func TestLoadConfigFromEnv_ScrubDefaults(t *testing.T) {
 	if cfg.Scrub.RedactedValue != "[REDACTED]" {
 		t.Errorf("expected RedactedValue '[REDACTED]', got %q", cfg.Scrub.RedactedValue)
 	}
-	if cfg.Scrub.DBStatementMaxLength != 256 {
-		t.Errorf("expected DBStatementMaxLength 256, got %d", cfg.Scrub.DBStatementMaxLength)
+	if cfg.Scrub.DBStatementMaxLength != 2048 {
+		t.Errorf("expected DBStatementMaxLength 2048, got %d", cfg.Scrub.DBStatementMaxLength)
+	}
+	// Verify updated default sensitive keys
+	expectedKeys := []string{"password", "token", "secret", "key", "email"}
+	if len(cfg.Scrub.SensitiveKeys) != len(expectedKeys) {
+		t.Errorf("expected %d sensitive keys, got %d: %v", len(expectedKeys), len(cfg.Scrub.SensitiveKeys), cfg.Scrub.SensitiveKeys)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LoadConfigFromEnv - HTTP config
+// ---------------------------------------------------------------------------
+
+func TestLoadConfigFromEnv_HTTPDefaults(t *testing.T) {
+	// Clear all HTTP env vars
+	httpEnvVars := []string{
+		"OTEL_HTTP_CAPTURE_REQUEST_HEADERS",
+		"OTEL_HTTP_CAPTURE_RESPONSE_HEADERS",
+		"OTEL_HTTP_CAPTURE_QUERY_PARAMS",
+		"OTEL_HTTP_CAPTURE_REQUEST_BODY",
+		"OTEL_HTTP_CAPTURE_RESPONSE_BODY",
+		"OTEL_HTTP_REQUEST_BODY_MAX_SIZE",
+		"OTEL_HTTP_RESPONSE_BODY_MAX_SIZE",
+		"OTEL_HTTP_BODY_ALLOWED_CONTENT_TYPES",
+		"OTEL_HTTP_RECORD_EXCEPTION_EVENTS",
+		"OTEL_HTTP_SENSITIVE_HEADERS",
+	}
+	for _, key := range httpEnvVars {
+		t.Setenv(key, "")
+	}
+
+	cfg := LoadConfigFromEnv()
+
+	if !cfg.HTTP.CaptureRequestHeaders {
+		t.Error("expected CaptureRequestHeaders to default to true")
+	}
+	if !cfg.HTTP.CaptureResponseHeaders {
+		t.Error("expected CaptureResponseHeaders to default to true")
+	}
+	if !cfg.HTTP.CaptureQueryParams {
+		t.Error("expected CaptureQueryParams to default to true")
+	}
+	if cfg.HTTP.CaptureRequestBody {
+		t.Error("expected CaptureRequestBody to default to false")
+	}
+	if cfg.HTTP.CaptureResponseBody {
+		t.Error("expected CaptureResponseBody to default to false")
+	}
+	if cfg.HTTP.RequestBodyMaxSize != 8192 {
+		t.Errorf("expected RequestBodyMaxSize 8192, got %d", cfg.HTTP.RequestBodyMaxSize)
+	}
+	if cfg.HTTP.ResponseBodyMaxSize != 8192 {
+		t.Errorf("expected ResponseBodyMaxSize 8192, got %d", cfg.HTTP.ResponseBodyMaxSize)
+	}
+	if !cfg.HTTP.RecordExceptionEvents {
+		t.Error("expected RecordExceptionEvents to default to true")
+	}
+	if len(cfg.HTTP.SensitiveHeaders) != 5 {
+		t.Errorf("expected 5 default sensitive headers, got %d: %v", len(cfg.HTTP.SensitiveHeaders), cfg.HTTP.SensitiveHeaders)
+	}
+	if len(cfg.HTTP.BodyAllowedContentTypes) != 3 {
+		t.Errorf("expected 3 default content types, got %d: %v", len(cfg.HTTP.BodyAllowedContentTypes), cfg.HTTP.BodyAllowedContentTypes)
+	}
+}
+
+func TestLoadConfigFromEnv_HTTPCustomEnvVars(t *testing.T) {
+	t.Setenv("OTEL_HTTP_CAPTURE_REQUEST_BODY", "true")
+	t.Setenv("OTEL_HTTP_CAPTURE_RESPONSE_BODY", "true")
+	t.Setenv("OTEL_HTTP_REQUEST_BODY_MAX_SIZE", "4096")
+	t.Setenv("OTEL_HTTP_SENSITIVE_HEADERS", "authorization,x-custom-secret")
+
+	cfg := LoadConfigFromEnv()
+
+	if !cfg.HTTP.CaptureRequestBody {
+		t.Error("expected CaptureRequestBody=true")
+	}
+	if !cfg.HTTP.CaptureResponseBody {
+		t.Error("expected CaptureResponseBody=true")
+	}
+	if cfg.HTTP.RequestBodyMaxSize != 4096 {
+		t.Errorf("expected RequestBodyMaxSize 4096, got %d", cfg.HTTP.RequestBodyMaxSize)
+	}
+	if len(cfg.HTTP.SensitiveHeaders) != 2 {
+		t.Errorf("expected 2 sensitive headers, got %d: %v", len(cfg.HTTP.SensitiveHeaders), cfg.HTTP.SensitiveHeaders)
 	}
 }
 
