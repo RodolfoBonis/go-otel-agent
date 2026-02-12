@@ -8,13 +8,15 @@ Built for [SigNoz](https://signoz.io), but works with any OpenTelemetry-compatib
 
 - **Zero-config startup** — Only 3 env vars required (`OTEL_SERVICE_NAME`, `OTEL_SERVICE_NAMESPACE`, `OTEL_SERVICE_VERSION`)
 - **Full OpenTelemetry stack** — Traces, metrics, and logs via OTLP (gRPC/HTTP)
-- **Smart defaults** — 35+ configuration values baked in as production-ready defaults
-- **Gin middleware** — Single consolidated middleware with route exclusion, custom enrichment, and metrics
-- **GORM plugin** — Automatic database query tracing
+- **Smart defaults** — 50+ configuration values baked in as production-ready defaults
+- **Datadog-level HTTP enrichment** — Request/response headers, query params, body capture, exception events
+- **Gin middleware** — Lazy-init middleware with route exclusion, HTTP enrichment, PII scrubbing, and metrics
+- **GORM plugin** — Lazy tracer provider with full SQL query text, query variables, and stack traces on errors
 - **Redis plugin** — Automatic Redis operation tracing
 - **AMQP plugin** — RabbitMQ trace context propagation
-- **Uber FX integration** — Full DI lifecycle management
-- **PII scrubbing** — Automatic redaction of sensitive span attributes
+- **Uber FX compatible** — Lazy initialization solves FX lifecycle ordering (works with `fx.Invoke` + `OnStart`)
+- **PII scrubbing** — Automatic redaction of sensitive span attributes and HTTP data
+- **HTTP PII scrubbing** — Sensitive headers always redacted, query params and body patterns scrubbed
 - **Health probes** — Built-in health and readiness endpoints
 - **Route exclusion** — Three-layer matcher (exact, prefix, glob) for excluding paths from instrumentation
 - **Noop safety** — All providers return noop implementations when disabled (never nil, never panics)
@@ -165,6 +167,7 @@ go-otel-agent/
 │   ├── metric.go                   # MeterProvider with OTLP exporter
 │   ├── log.go                      # LoggerProvider with OTLP exporter
 │   ├── scrub.go                    # PII scrubbing SpanProcessor
+│   ├── http_scrubber.go            # HTTP-specific PII scrubber (headers, query, body)
 │   └── exporter_health.go          # Exporter health tracking
 ├── helper/
 │   ├── span.go                     # StartSpan, TraceFunction, TraceFunctionWithResult
@@ -188,11 +191,11 @@ go-otel-agent/
 │       └── route.go                # Three-layer route exclusion matcher
 ├── integration/
 │   ├── ginmiddleware/
-│   │   ├── middleware.go           # otelgin-based Gin middleware
+│   │   ├── middleware.go           # Lazy-init Gin middleware with HTTP enrichment
 │   │   ├── health.go               # Health/readiness Gin handlers
 │   │   └── body.go                 # Response body capture
 │   ├── gormplugin/
-│   │   └── plugin.go               # GORM auto-instrumentation
+│   │   └── plugin.go               # GORM with lazy TracerProvider + SQL truncation
 │   ├── redisplugin/
 │   │   └── plugin.go               # Redis auto-instrumentation
 │   └── amqpplugin/
@@ -246,11 +249,28 @@ The library loads configuration from environment variables with smart defaults. 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OTEL_SCRUB_ENABLED` | `false` | Enable PII scrubbing |
-| `OTEL_SCRUB_SENSITIVE_KEYS` | (none) | Comma-separated attribute keys to redact |
-| `OTEL_SCRUB_SENSITIVE_PATTERNS` | (none) | Regex patterns for key matching |
-| `OTEL_SCRUB_REDACTED_VALUE` | `[REDACTED]` | Replacement value |
-| `OTEL_SCRUB_DB_STATEMENT_MAX_LENGTH` | `0` | Truncate db.statement (0=full, -1=redact) |
+| `OTEL_PII_SCRUB_ENABLED` | `false` | Enable PII scrubbing |
+| `OTEL_PII_SENSITIVE_KEYS` | `password,token,secret,key,email` | Comma-separated attribute keys to redact |
+| `OTEL_PII_SENSITIVE_PATTERNS` | `.*password.*,.*token.*,.*secret.*` | Regex patterns for key matching |
+| `OTEL_PII_REDACTED_VALUE` | `[REDACTED]` | Replacement value |
+| `OTEL_PII_DB_STATEMENT_MAX_LENGTH` | `2048` | Truncate db.statement (0=full, -1=redact) |
+
+#### HTTP Capture
+
+Control what HTTP data is captured in spans. Headers are captured by default; body capture is opt-in.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_HTTP_CAPTURE_REQUEST_HEADERS` | `true` | Capture request headers as span attributes |
+| `OTEL_HTTP_CAPTURE_RESPONSE_HEADERS` | `true` | Capture response headers as span attributes |
+| `OTEL_HTTP_CAPTURE_QUERY_PARAMS` | `true` | Capture URL query string |
+| `OTEL_HTTP_CAPTURE_REQUEST_BODY` | `false` | Capture request body (opt-in, expensive) |
+| `OTEL_HTTP_CAPTURE_RESPONSE_BODY` | `false` | Capture response body (opt-in, expensive) |
+| `OTEL_HTTP_REQUEST_BODY_MAX_SIZE` | `8192` | Max request body bytes to capture |
+| `OTEL_HTTP_RESPONSE_BODY_MAX_SIZE` | `8192` | Max response body bytes to capture |
+| `OTEL_HTTP_BODY_ALLOWED_CONTENT_TYPES` | `application/json,application/xml,text/plain` | Content types eligible for body capture |
+| `OTEL_HTTP_RECORD_EXCEPTION_EVENTS` | `true` | Add exception events for 4xx/5xx responses |
+| `OTEL_HTTP_SENSITIVE_HEADERS` | `authorization,cookie,set-cookie,x-api-key,x-auth-token` | Headers always redacted (regardless of scrub config) |
 
 #### SigNoz Cloud Authentication
 
@@ -450,12 +470,37 @@ r.GET("/health", ginmiddleware.HealthHandler(agent))
 r.GET("/ready", ginmiddleware.ReadinessHandler(agent))
 ```
 
-The middleware:
-- Creates spans with correct OpenTelemetry semantic conventions
-- Records `http.server.request.duration`, `http.server.request.total`, `http.server.errors.total` metrics
-- Respects route exclusion configuration
-- Adds `X-Trace-Id` response header for debugging
-- Enriches spans with `http.client_ip`, `http.request.id`, `user.id`, `user.role`
+The middleware uses **lazy initialization** (`sync.Once`) to resolve the real TracerProvider and MeterProvider on the first request. This solves the FX lifecycle ordering issue where `ginmiddleware.New()` runs during `fx.Invoke` but `agent.Init()` hasn't completed yet.
+
+**Span attributes captured automatically:**
+
+| Attribute | Source |
+|---|---|
+| `http.request.method`, `http.route`, `url.path`, `http.response.status_code` | otelgin (OpenTelemetry semconv) |
+| `http.client_ip` | `c.ClientIP()` |
+| `http.request.id` | Gin context `requestID` |
+| `user.id`, `user.role` | Gin context (if set by auth middleware) |
+| `http.request.header.<name>` | Request headers (sensitive ones redacted) |
+| `http.response.header.<name>` | Response headers (sensitive ones redacted) |
+| `url.query` | Query string (sensitive params redacted) |
+| `http.request.body` | Request body (opt-in via `OTEL_HTTP_CAPTURE_REQUEST_BODY`) |
+| `http.response.body` | Response body (opt-in via `OTEL_HTTP_CAPTURE_RESPONSE_BODY`) |
+| `http.request.body.size` | Request content length |
+| `http.response.body.size` | Response body length |
+
+**Error handling:**
+- 5xx responses set span status to `Error`
+- 4xx/5xx responses record an `exception` event with type and message (configurable via `OTEL_HTTP_RECORD_EXCEPTION_EVENTS`)
+
+**PII protection:**
+- Headers in `OTEL_HTTP_SENSITIVE_HEADERS` are **always** redacted (default: `authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`)
+- Query param values matching `OTEL_PII_SENSITIVE_PATTERNS` are redacted when scrubbing is enabled
+- Body content matching sensitive patterns is redacted when scrubbing is enabled
+
+**Metrics recorded:**
+- `http.server.request.duration` (histogram, seconds)
+- `http.server.request.total` (counter)
+- `http.server.errors.total` (counter, 4xx/5xx)
 
 ### Integration: GORM Database
 
@@ -465,8 +510,15 @@ import "github.com/RodolfoBonis/go-otel-agent/integration/gormplugin"
 db, _ := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 gormplugin.Instrument(db, agent)
 
-// All database queries are now automatically traced
+// All database queries are now automatically traced with:
+// - Full SQL query text with query variables
+// - Stack traces on database errors
+// - SQL truncation based on OTEL_PII_DB_STATEMENT_MAX_LENGTH (default: 2048)
 ```
+
+The GORM plugin uses a **lazy TracerProvider** that resolves the real global TracerProvider on every query. This solves the FX lifecycle issue where `gormplugin.Instrument()` is called during `fx.Invoke` before `agent.Init()` sets the global provider.
+
+DB spans appear as children of HTTP spans, creating a complete trace: `HTTP GET /api/v1/plans` -> `SELECT plans`.
 
 ### Integration: Redis
 
@@ -573,22 +625,34 @@ otelagent.WithRouteExclusions(otelagent.RouteExclusionConfig{
 
 ## PII Scrubbing
 
-Automatically redact sensitive attributes from spans before export:
+Two layers of PII protection work together:
 
-```go
-// Via environment variables
-// OTEL_SCRUB_ENABLED=true
-// OTEL_SCRUB_SENSITIVE_KEYS=user.email,user.phone,db.statement
-// OTEL_SCRUB_SENSITIVE_PATTERNS=.*password.*,.*token.*,.*secret.*
-// OTEL_SCRUB_REDACTED_VALUE=[REDACTED]
-// OTEL_SCRUB_DB_STATEMENT_MAX_LENGTH=256
+### Span Attribute Scrubbing
+
+Automatically redact sensitive span attributes before export:
+
+```bash
+OTEL_PII_SCRUB_ENABLED=true
+OTEL_PII_SENSITIVE_KEYS=password,token,secret,key,email
+OTEL_PII_SENSITIVE_PATTERNS=.*password.*,.*token.*,.*secret.*
+OTEL_PII_REDACTED_VALUE=[REDACTED]
+OTEL_PII_DB_STATEMENT_MAX_LENGTH=2048
 ```
 
-The scrubber:
 - Matches attribute keys by exact name or regex pattern
 - Replaces values with `[REDACTED]` (configurable)
-- Optionally truncates `db.statement` to a max length
+- Truncates `db.statement` to configurable max length (default: 2048 chars)
 - Runs as a SpanProcessor (before export)
+
+### HTTP Data Scrubbing
+
+HTTP-specific scrubbing that protects sensitive data in request/response captures:
+
+- **Sensitive headers** (e.g., `Authorization`, `Cookie`) are **always** redacted, regardless of whether PII scrubbing is enabled
+- **Query param values** matching sensitive patterns are redacted when `OTEL_PII_SCRUB_ENABLED=true`
+- **Body content** matching sensitive patterns is redacted when `OTEL_PII_SCRUB_ENABLED=true`
+- **Body content** is truncated to `OTEL_HTTP_REQUEST_BODY_MAX_SIZE` / `OTEL_HTTP_RESPONSE_BODY_MAX_SIZE`
+- Only `OTEL_HTTP_BODY_ALLOWED_CONTENT_TYPES` are eligible for body capture (binary data is never captured)
 
 ## Bugs Fixed from Original Implementation
 
@@ -605,6 +669,12 @@ This library was extracted from a production codebase and fixes these issues:
 | `user_id` as metric attribute — cardinality bomb | Removed from metrics, kept on spans only |
 | Metric instruments recreated on every call | Cached via `sync.Map` |
 | Duplicate HTTP instrumentation (instrumentor + middleware) | Consolidated into single `otelgin`-based middleware |
+| FX lifecycle: Gin middleware captures noop TracerProvider | Lazy init via `sync.Once` — resolves real provider on first request |
+| FX lifecycle: GORM plugin captures noop tracer eagerly | Lazy `TracerProvider`/`Tracer` wrappers resolve global provider per query |
+| DB spans orphaned (no HTTP parent) | Both fixes together ensure correct parent-child span linking |
+| DB spans missing query text | GORM plugin includes query variables by default + SQL truncation |
+| No HTTP request/response details in spans | Full header, query param, and body capture with PII scrubbing |
+| No error events for HTTP 4xx/5xx | Exception events recorded with status code and error message |
 
 ## Examples
 

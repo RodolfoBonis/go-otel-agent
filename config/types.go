@@ -46,6 +46,9 @@ type Config struct {
 
 	// PII scrubbing
 	Scrub ScrubConfig `json:"scrub"`
+
+	// HTTP capture settings
+	HTTP HTTPConfig `json:"http"`
 }
 
 // AuthConfig holds authentication headers for OTLP exporters.
@@ -218,6 +221,22 @@ type ScrubConfig struct {
 	SensitivePatterns    []string `json:"sensitive_patterns"`
 	RedactedValue        string   `json:"redacted_value"`
 	DBStatementMaxLength int      `json:"db_statement_max_length"`
+}
+
+// HTTPConfig configures HTTP request/response capture for spans.
+type HTTPConfig struct {
+	CaptureRequestHeaders  bool     `json:"capture_request_headers"`
+	CaptureResponseHeaders bool     `json:"capture_response_headers"`
+	AllowedRequestHeaders  []string `json:"allowed_request_headers"`
+	AllowedResponseHeaders []string `json:"allowed_response_headers"`
+	CaptureQueryParams     bool     `json:"capture_query_params"`
+	CaptureRequestBody     bool     `json:"capture_request_body"`
+	CaptureResponseBody    bool     `json:"capture_response_body"`
+	RequestBodyMaxSize     int      `json:"request_body_max_size"`
+	ResponseBodyMaxSize    int      `json:"response_body_max_size"`
+	BodyAllowedContentTypes []string `json:"body_allowed_content_types"`
+	RecordExceptionEvents  bool     `json:"record_exception_events"`
+	SensitiveHeaders       []string `json:"sensitive_headers"`
 }
 
 // ResolvedAuthHeaders returns all auth headers with env vars resolved.
