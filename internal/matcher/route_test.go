@@ -235,6 +235,60 @@ func TestIsEmpty_False_WithPatterns(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Versioned health paths (e.g. /v1/health_check, /api/v1/health)
+// ---------------------------------------------------------------------------
+
+func TestShouldExclude_VersionedHealthPaths(t *testing.T) {
+	m := matcher.NewRouteMatcher(matcher.RouteExclusionConfig{
+		Patterns: []string{
+			"/*/health", "/*/healthz", "/*/health_check",
+			"/*/metrics", "/*/ready", "/*/live",
+			"/*/*/health", "/*/*/healthz", "/*/*/health_check",
+			"/*/*/metrics", "/*/*/ready", "/*/*/live",
+		},
+	})
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		// Single-prefix versioned paths (e.g. /v1/...)
+		{"/v1/health_check", true},
+		{"/v1/health", true},
+		{"/v1/healthz", true},
+		{"/v1/metrics", true},
+		{"/v1/ready", true},
+		{"/v1/live", true},
+		{"/v2/health", true},
+
+		// Two-prefix versioned paths (e.g. /api/v1/...)
+		{"/api/v1/health", true},
+		{"/api/v1/healthz", true},
+		{"/api/v1/health_check", true},
+		{"/api/v2/metrics", true},
+		{"/api/v1/ready", true},
+		{"/api/v1/live", true},
+
+		// Non-matching paths
+		{"/v1/orders", false},
+		{"/v1/login", false},
+		{"/api/v1/users", false},
+		{"/api/v1/orders/123", false},
+
+		// 3-segment paths that should NOT match /*/... patterns
+		{"/api/v1/orders", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := m.ShouldExclude(tc.path); got != tc.want {
+				t.Errorf("ShouldExclude(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Edge cases: empty strings in config are filtered out
 // ---------------------------------------------------------------------------
 

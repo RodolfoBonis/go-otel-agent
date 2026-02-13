@@ -230,7 +230,12 @@ func loadRouteExclusionConfig() RouteExclusionConfig {
 			"/health", "/healthz", "/health_check", "/metrics", "/ready", "/live",
 		}),
 		PrefixPaths: getStringSliceEnv("OTEL_TRACES_EXCLUDED_PREFIXES", nil),
-		Patterns:    getStringSliceEnv("OTEL_TRACES_EXCLUDED_PATTERNS", nil),
+		Patterns: getStringSliceEnv("OTEL_TRACES_EXCLUDED_PATTERNS", []string{
+			"/*/health", "/*/healthz", "/*/health_check",
+			"/*/metrics", "/*/ready", "/*/live",
+			"/*/*/health", "/*/*/healthz", "/*/*/health_check",
+			"/*/*/metrics", "/*/*/ready", "/*/*/live",
+		}),
 	}
 }
 

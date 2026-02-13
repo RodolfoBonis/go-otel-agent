@@ -636,6 +636,21 @@ func TestLoadConfigFromEnv_RouteExclusionDefaults(t *testing.T) {
 			t.Errorf("expected ExactPaths[%d]=%q, got %q", i, expected, cfg.RouteExclusion.ExactPaths[i])
 		}
 	}
+
+	defaultPatterns := []string{
+		"/*/health", "/*/healthz", "/*/health_check",
+		"/*/metrics", "/*/ready", "/*/live",
+		"/*/*/health", "/*/*/healthz", "/*/*/health_check",
+		"/*/*/metrics", "/*/*/ready", "/*/*/live",
+	}
+	if len(cfg.RouteExclusion.Patterns) != len(defaultPatterns) {
+		t.Fatalf("expected %d default patterns, got %d: %v", len(defaultPatterns), len(cfg.RouteExclusion.Patterns), cfg.RouteExclusion.Patterns)
+	}
+	for i, expected := range defaultPatterns {
+		if cfg.RouteExclusion.Patterns[i] != expected {
+			t.Errorf("expected Patterns[%d]=%q, got %q", i, expected, cfg.RouteExclusion.Patterns[i])
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
