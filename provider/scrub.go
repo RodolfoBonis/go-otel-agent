@@ -64,23 +64,41 @@ func (sp *ScrubProcessor) OnStart(_ context.Context, s sdktrace.ReadWriteSpan) {
 		key := string(attr.Key)
 
 		if sp.isSensitive(key) {
-			// Handle db.statement truncation
-			if key == "db.statement" && sp.config.DBStatementMaxLength > 0 {
-				val := attr.Value.AsString()
-				if len(val) > sp.config.DBStatementMaxLength {
-					val = val[:sp.config.DBStatementMaxLength] + "..."
-				}
-				scrubbed = append(scrubbed, attribute.String(key, val))
-			} else if key == "db.statement" && sp.config.DBStatementMaxLength == -1 {
-				scrubbed = append(scrubbed, attribute.String(key, redacted))
-			} else {
-				scrubbed = append(scrubbed, attribute.String(key, redacted))
-			}
+			scrubbed = append(scrubbed, attribute.String(key, redacted))
 		}
 	}
 
 	if len(scrubbed) > 0 {
 		s.SetAttributes(scrubbed...)
+	}
+
+	// DB statement truncation (separate concern from PII redaction)
+	if sp.config.DBStatementMaxLength > 0 {
+		sp.truncateDBStatements(s)
+	}
+}
+
+// truncateDBStatements applies length truncation to DB query attributes.
+// Handles both db.statement (legacy semconv) and db.query.text (new semconv).
+func (sp *ScrubProcessor) truncateDBStatements(s sdktrace.ReadWriteSpan) {
+	dbKeys := []string{"db.statement", "db.query.text"}
+	attrs := s.Attributes()
+	var truncated []attribute.KeyValue
+
+	for _, attr := range attrs {
+		key := string(attr.Key)
+		for _, dbKey := range dbKeys {
+			if key == dbKey {
+				val := attr.Value.AsString()
+				if len(val) > sp.config.DBStatementMaxLength {
+					truncated = append(truncated, attribute.String(key, val[:sp.config.DBStatementMaxLength]+"..."))
+				}
+			}
+		}
+	}
+
+	if len(truncated) > 0 {
+		s.SetAttributes(truncated...)
 	}
 }
 

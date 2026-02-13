@@ -17,7 +17,7 @@ Built for [SigNoz](https://signoz.io), but works with any OpenTelemetry-compatib
 - **Uber FX compatible** — Lazy initialization solves FX lifecycle ordering (works with `fx.Invoke` + `OnStart`)
 - **PII scrubbing** — Automatic redaction of sensitive span attributes and HTTP data
 - **HTTP PII scrubbing** — Sensitive headers always redacted, query params and body patterns scrubbed
-- **Health probes** — Built-in health and readiness endpoints
+- **Health probes** — Built-in health, readiness, and diagnostics endpoints
 - **Route exclusion** — Three-layer matcher (exact, prefix, glob) with default versioned health patterns
 - **Noop safety** — All providers return noop implementations when disabled (never nil, never panics)
 - **Metric cardinality control** — No `user_id` or `error_message` in metric attributes
@@ -25,7 +25,9 @@ Built for [SigNoz](https://signoz.io), but works with any OpenTelemetry-compatib
 - **ParentBased sampling** — Ratio sampler always wrapped in `ParentBased` for correct distributed tracing
 - **SigNoz Cloud support** — Auth headers and TLS configuration for secured collectors
 - **Graceful degradation** — Exporter health tracking (healthy/degraded/unhealthy)
-- **HTTP client instrumentation** — Automatic tracing for outgoing HTTP requests
+- **HTTP client instrumentation** — Automatic tracing for outgoing HTTP requests with legacy semconv bridge for SigNoz External Call dashboard
+- **SigNoz semconv bridge** — Automatic `db.query.text` → `db.statement` duplication for SigNoz DB query visibility
+- **Diagnostics endpoint** — Runtime config inspection for debugging telemetry issues
 
 ## Installation
 
@@ -154,7 +156,7 @@ go-otel-agent/
 ├── config.go                       # Configuration with smart defaults + env var loading
 ├── options.go                      # Functional options: WithServiceName, WithEndpoint, etc.
 ├── errors.go                       # Sentinel errors
-├── health.go                       # HealthCheck, ReadinessCheck
+├── health.go                       # HealthCheck, ReadinessCheck, Diagnostics
 ├── noop.go                         # Noop tracer/meter (never nil)
 ├── config/
 │   └── types.go                    # All configuration struct definitions
@@ -185,17 +187,17 @@ go-otel-agent/
 ├── instrumentor/
 │   ├── instrumentor.go             # Function tracing via reflection
 │   ├── propagation.go              # W3C trace context propagation
-│   └── httpclient.go               # HTTP client instrumentation
+│   └── httpclient.go               # HTTP client instrumentation with legacy semconv bridge
 ├── internal/
 │   └── matcher/
 │       └── route.go                # Three-layer route exclusion matcher
 ├── integration/
 │   ├── ginmiddleware/
 │   │   ├── middleware.go           # Direct span management with HTTP enrichment
-│   │   ├── health.go               # Health/readiness Gin handlers
+│   │   ├── health.go               # Health/readiness/diagnostics Gin handlers
 │   │   └── body.go                 # Response body capture
 │   ├── gormplugin/
-│   │   └── plugin.go               # GORM with lazy TracerProvider, db.namespace/db.user, SQL truncation
+│   │   └── plugin.go               # GORM with lazy TracerProvider, db.namespace/db.user, SQL truncation, semconv bridge
 │   ├── redisplugin/
 │   │   └── plugin.go               # Redis auto-instrumentation
 │   └── amqpplugin/
@@ -253,7 +255,7 @@ The library loads configuration from environment variables with smart defaults. 
 | `OTEL_PII_SENSITIVE_KEYS` | `password,token,secret,key,email` | Comma-separated attribute keys to redact |
 | `OTEL_PII_SENSITIVE_PATTERNS` | `.*password.*,.*token.*,.*secret.*` | Regex patterns for key matching |
 | `OTEL_PII_REDACTED_VALUE` | `[REDACTED]` | Replacement value |
-| `OTEL_PII_DB_STATEMENT_MAX_LENGTH` | `2048` | Truncate db.statement (0=full, -1=redact) |
+| `OTEL_PII_DB_STATEMENT_MAX_LENGTH` | `2048` | Truncate `db.statement` and `db.query.text` (0=disabled) |
 
 #### HTTP Capture
 
@@ -542,7 +544,8 @@ gormplugin.Instrument(db, agent,
 
 | Attribute | Source |
 |---|---|
-| `db.query.text` | Full SQL query text |
+| `db.query.text` | Full SQL query text (new semconv) |
+| `db.statement` | Full SQL query text (legacy semconv, auto-bridged from `db.query.text`) |
 | `db.operation.name` | SQL operation (SELECT, INSERT, etc.) |
 | `db.collection.name` | Table name |
 | `db.rows_affected` | Number of rows affected |
@@ -552,6 +555,8 @@ gormplugin.Instrument(db, agent,
 | `db.user` | Database user (via `WithDBUser`) |
 
 The GORM plugin uses a **lazy TracerProvider** that resolves the real global TracerProvider on every query. This solves the FX lifecycle issue where `gormplugin.Instrument()` is called during `fx.Invoke` before `agent.Init()` sets the global provider.
+
+**Semconv bridge:** The GORM OTel plugin v0.1.16 emits `db.query.text` (new semconv), but SigNoz displays `db.statement` (legacy semconv). The bridge span wrapper automatically duplicates `db.query.text` as `db.statement` so SQL queries are visible in both old and new SigNoz versions.
 
 DB spans appear as children of HTTP spans, creating a complete trace: `HTTP GET /api/v1/plans` -> `SELECT plans`.
 
@@ -594,6 +599,8 @@ resp, err := client.Get("https://api.example.com/data")
 // Outgoing request is automatically traced with span: "HTTP GET api.example.com"
 ```
 
+**Legacy semconv bridge:** `otelhttp` v0.65.0 emits only new semconv attributes (`server.address`, `url.full`, `http.request.method`), but SigNoz External Call dashboard uses legacy attributes (`net.peer.name`, `http.url`, `http.method`) for hostname grouping. The inner transport wrapper automatically injects both, so external calls show actual hostnames instead of generic labels.
+
 ### Health Probes
 
 ```go
@@ -604,9 +611,16 @@ status := agent.HealthCheck()
 // Readiness check
 ready := agent.ReadinessCheck() // true when initialized and running
 
+// Diagnostics (runtime config for debugging)
+diag := agent.Diagnostics()
+// DiagnosticsInfo{Enabled: true, Running: true, Environment: "staging",
+//   ServiceName: "my-api", Endpoint: "signoz:4317", SamplingRate: 0.5,
+//   TracerType: "*trace.TracerProvider", Features: {...}}
+
 // Gin handlers
 r.GET("/health", ginmiddleware.HealthHandler(agent))
 r.GET("/ready", ginmiddleware.ReadinessHandler(agent))
+r.GET("/debug/otel", ginmiddleware.DiagnosticsHandler(agent))
 ```
 
 ### Uber FX Module
@@ -688,7 +702,8 @@ OTEL_PII_DB_STATEMENT_MAX_LENGTH=2048
 
 - Matches attribute keys by exact name or regex pattern
 - Replaces values with `[REDACTED]` (configurable)
-- Truncates `db.statement` to configurable max length (default: 2048 chars)
+- Truncates `db.statement` and `db.query.text` to configurable max length (default: 2048 chars)
+- DB truncation runs independently from PII redaction (always applies when `DBStatementMaxLength > 0`)
 - Runs as a SpanProcessor (before export)
 
 ### HTTP Data Scrubbing
@@ -722,8 +737,12 @@ This library was extracted from a production codebase and fixes these issues:
 | DB spans orphaned (no HTTP parent) | Both fixes together ensure correct parent-child span linking |
 | DB spans missing query text | GORM plugin includes query variables by default + SQL truncation |
 | DB spans missing database name/user | `WithDBName()` / `WithDBUser()` add `db.namespace` and `db.user` attributes |
+| DB queries not visible in SigNoz (new semconv) | Semconv bridge duplicates `db.query.text` as `db.statement` for SigNoz |
+| DB truncation logic was dead code (inside `isSensitive()`) | Extracted as independent concern, handles both `db.statement` and `db.query.text` |
+| SigNoz External Call shows generic labels (A, F1) | Legacy semconv transport injects `net.peer.name`, `http.url`, `http.method` |
 | No HTTP request/response details in spans | Full header, query param, and body capture with PII scrubbing |
 | No error events for HTTP 4xx/5xx | Exception events recorded with status code and error message |
+| No runtime config inspection for debugging | `Diagnostics()` method and `DiagnosticsHandler` expose config at runtime |
 
 ## Examples
 
