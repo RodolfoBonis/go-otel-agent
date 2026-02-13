@@ -34,7 +34,29 @@ type lazyTracer struct {
 }
 
 func (t *lazyTracer) Start(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
-	return otel.GetTracerProvider().Tracer(t.name, t.opts...).Start(ctx, spanName, opts...)
+	ctx, span := otel.GetTracerProvider().Tracer(t.name, t.opts...).Start(ctx, spanName, opts...)
+	bridged := &dbSemconvBridgeSpan{Span: span}
+	return trace.ContextWithSpan(ctx, bridged), bridged
+}
+
+// dbSemconvBridgeSpan intercepts SetAttributes to duplicate db.query.text
+// (new semconv emitted by GORM plugin v0.1.16) as db.statement (legacy
+// semconv that SigNoz uses for displaying SQL queries).
+type dbSemconvBridgeSpan struct {
+	trace.Span
+}
+
+func (s *dbSemconvBridgeSpan) SetAttributes(attrs ...attribute.KeyValue) {
+	var extra []attribute.KeyValue
+	for _, a := range attrs {
+		if a.Key == "db.query.text" {
+			extra = append(extra, attribute.String("db.statement", a.Value.AsString()))
+		}
+	}
+	if len(extra) > 0 {
+		attrs = append(attrs, extra...)
+	}
+	s.Span.SetAttributes(attrs...)
 }
 
 // InstrumentOption configures additional attributes for GORM DB spans.

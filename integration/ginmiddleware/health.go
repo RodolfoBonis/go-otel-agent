@@ -31,3 +31,11 @@ func ReadinessHandler(agent *otelagent.Agent) gin.HandlerFunc {
 		}
 	}
 }
+
+// DiagnosticsHandler returns a Gin handler that exposes runtime config
+// for debugging telemetry issues (missing traces, wrong sampling, etc.).
+func DiagnosticsHandler(agent *otelagent.Agent) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, agent.Diagnostics())
+	}
+}

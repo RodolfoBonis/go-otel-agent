@@ -1,6 +1,8 @@
 package otelagent
 
 import (
+	"fmt"
+
 	"github.com/RodolfoBonis/go-otel-agent/provider"
 )
 
@@ -48,4 +50,39 @@ func (a *Agent) ReadinessCheck() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.initialized && a.running
+}
+
+// DiagnosticsInfo surfaces runtime configuration for debugging telemetry issues.
+type DiagnosticsInfo struct {
+	Enabled      bool    `json:"enabled"`
+	Running      bool    `json:"running"`
+	Environment  string  `json:"environment"`
+	ServiceName  string  `json:"service_name"`
+	Namespace    string  `json:"namespace"`
+	Version      string  `json:"version"`
+	Endpoint     string  `json:"endpoint"`
+	SamplingRate float64 `json:"sampling_rate"`
+	TracerType   string  `json:"tracer_type"`
+	Features     any     `json:"features"`
+}
+
+// Diagnostics returns runtime configuration details for debugging.
+func (a *Agent) Diagnostics() DiagnosticsInfo {
+	tracerType := "noop"
+	if a.tracerProvider != nil {
+		tracerType = fmt.Sprintf("%T", a.tracerProvider)
+	}
+
+	return DiagnosticsInfo{
+		Enabled:      a.config.Enabled,
+		Running:      a.IsRunning(),
+		Environment:  a.config.Environment,
+		ServiceName:  a.config.ServiceName,
+		Namespace:    a.config.Namespace,
+		Version:      a.config.Version,
+		Endpoint:     a.config.Endpoint,
+		SamplingRate: a.config.Traces.Sampling.Rate,
+		TracerType:   tracerType,
+		Features:     a.config.Features,
+	}
 }
