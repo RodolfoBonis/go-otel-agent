@@ -10,15 +10,15 @@ Built for [SigNoz](https://signoz.io), but works with any OpenTelemetry-compatib
 - **Full OpenTelemetry stack** — Traces, metrics, and logs via OTLP (gRPC/HTTP)
 - **Smart defaults** — 50+ configuration values baked in as production-ready defaults
 - **Datadog-level HTTP enrichment** — Request/response headers, query params, body capture, exception events
-- **Gin middleware** — Lazy-init middleware with route exclusion, HTTP enrichment, PII scrubbing, and metrics
-- **GORM plugin** — Lazy tracer provider with full SQL query text, query variables, and stack traces on errors
+- **Gin middleware** — Direct span management with W3C propagation, HTTP enrichment, PII scrubbing, and metrics
+- **GORM plugin** — Lazy tracer provider with full SQL query text, `db.namespace`/`db.user` attributes, and stack traces on errors
 - **Redis plugin** — Automatic Redis operation tracing
 - **AMQP plugin** — RabbitMQ trace context propagation
 - **Uber FX compatible** — Lazy initialization solves FX lifecycle ordering (works with `fx.Invoke` + `OnStart`)
 - **PII scrubbing** — Automatic redaction of sensitive span attributes and HTTP data
 - **HTTP PII scrubbing** — Sensitive headers always redacted, query params and body patterns scrubbed
 - **Health probes** — Built-in health and readiness endpoints
-- **Route exclusion** — Three-layer matcher (exact, prefix, glob) for excluding paths from instrumentation
+- **Route exclusion** — Three-layer matcher (exact, prefix, glob) with default versioned health patterns
 - **Noop safety** — All providers return noop implementations when disabled (never nil, never panics)
 - **Metric cardinality control** — No `user_id` or `error_message` in metric attributes
 - **Instrument caching** — Metric instruments cached via `sync.Map` (no recreation per call)
@@ -191,11 +191,11 @@ go-otel-agent/
 │       └── route.go                # Three-layer route exclusion matcher
 ├── integration/
 │   ├── ginmiddleware/
-│   │   ├── middleware.go           # Lazy-init Gin middleware with HTTP enrichment
+│   │   ├── middleware.go           # Direct span management with HTTP enrichment
 │   │   ├── health.go               # Health/readiness Gin handlers
 │   │   └── body.go                 # Response body capture
 │   ├── gormplugin/
-│   │   └── plugin.go               # GORM with lazy TracerProvider + SQL truncation
+│   │   └── plugin.go               # GORM with lazy TracerProvider, db.namespace/db.user, SQL truncation
 │   ├── redisplugin/
 │   │   └── plugin.go               # Redis auto-instrumentation
 │   └── amqpplugin/
@@ -241,9 +241,9 @@ The library loads configuration from environment variables with smart defaults. 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OTEL_TRACES_EXCLUDED_PATHS` | `/health,/healthz,/metrics,/ready,/live` | Exact path exclusions |
+| `OTEL_TRACES_EXCLUDED_PATHS` | `/health,/healthz,/health_check,/metrics,/ready,/live` | Exact path exclusions |
 | `OTEL_TRACES_EXCLUDED_PREFIXES` | (none) | Prefix exclusions (e.g., `/debug/,/internal/`) |
-| `OTEL_TRACES_EXCLUDED_PATTERNS` | (none) | Glob patterns (e.g., `/api/v*/health`) |
+| `OTEL_TRACES_EXCLUDED_PATTERNS` | See [Route Exclusion](#route-exclusion) | Glob patterns (e.g., `/*/health`) |
 
 #### PII Scrubbing
 
@@ -470,14 +470,27 @@ r.GET("/health", ginmiddleware.HealthHandler(agent))
 r.GET("/ready", ginmiddleware.ReadinessHandler(agent))
 ```
 
-The middleware uses **lazy initialization** (`sync.Once`) to resolve the real TracerProvider and MeterProvider on the first request. This solves the FX lifecycle ordering issue where `ginmiddleware.New()` runs during `fx.Invoke` but `agent.Init()` hasn't completed yet.
+The middleware manages the full span lifecycle directly (no delegation to `otelgin`). It uses **lazy initialization** (`sync.Once`) to resolve the real TracerProvider and MeterProvider on the first request, solving the FX lifecycle ordering issue where `ginmiddleware.New()` runs during `fx.Invoke` but `agent.Init()` hasn't completed yet.
+
+**Span lifecycle:**
+
+```
+tracer.Start → c.Next() → enrichSpan → defer span.End()
+```
+
+W3C trace context (`traceparent`, `baggage`) is extracted from incoming headers for distributed trace propagation.
 
 **Span attributes captured automatically:**
 
 | Attribute | Source |
 |---|---|
-| `http.request.method`, `http.route`, `url.path`, `http.response.status_code` | otelgin (OpenTelemetry semconv) |
-| `http.client_ip` | `c.ClientIP()` |
+| `http.request.method`, `url.path`, `url.scheme`, `http.response.status_code` | OpenTelemetry semconv (set at span start) |
+| `http.route` | Gin registered route pattern (set post-handler) |
+| `server.address` | Service name |
+| `client.address` | `c.ClientIP()` |
+| `user_agent.original` | User-Agent header |
+| `http.request.content_length` | Request Content-Length |
+| `http.client_ip` | `c.ClientIP()` (enrichment) |
 | `http.request.id` | Gin context `requestID` |
 | `user.id`, `user.role` | Gin context (if set by auth middleware) |
 | `http.request.header.<name>` | Request headers (sensitive ones redacted) |
@@ -487,6 +500,12 @@ The middleware uses **lazy initialization** (`sync.Once`) to resolve the real Tr
 | `http.response.body` | Response body (opt-in via `OTEL_HTTP_CAPTURE_RESPONSE_BODY`) |
 | `http.request.body.size` | Request content length |
 | `http.response.body.size` | Response body length |
+
+**Response headers set by middleware:**
+
+| Header | Description |
+|---|---|
+| `X-Trace-Id` | Current trace ID — useful for debugging and correlating logs |
 
 **Error handling:**
 - 5xx responses set span status to `Error`
@@ -508,13 +527,29 @@ The middleware uses **lazy initialization** (`sync.Once`) to resolve the real Tr
 import "github.com/RodolfoBonis/go-otel-agent/integration/gormplugin"
 
 db, _ := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+
+// Basic usage
 gormplugin.Instrument(db, agent)
 
-// All database queries are now automatically traced with:
-// - Full SQL query text with query variables
-// - Stack traces on database errors
-// - SQL truncation based on OTEL_PII_DB_STATEMENT_MAX_LENGTH (default: 2048)
+// With database name and user (adds db.namespace and db.user to every span)
+gormplugin.Instrument(db, agent,
+    gormplugin.WithDBName("mydb"),
+    gormplugin.WithDBUser("app_user"),
+)
 ```
+
+**Span attributes:**
+
+| Attribute | Source |
+|---|---|
+| `db.query.text` | Full SQL query text |
+| `db.operation.name` | SQL operation (SELECT, INSERT, etc.) |
+| `db.collection.name` | Table name |
+| `db.rows_affected` | Number of rows affected |
+| `server.address` | Database host |
+| `db.system.name` | Database system (e.g., `postgresql`) |
+| `db.namespace` | Database name (via `WithDBName`) |
+| `db.user` | Database user (via `WithDBUser`) |
 
 The GORM plugin uses a **lazy TracerProvider** that resolves the real global TracerProvider on every query. This solves the FX lifecycle issue where `gormplugin.Instrument()` is called during `fx.Invoke` before `agent.Init()` sets the global provider.
 
@@ -613,15 +648,27 @@ The three-layer matcher excludes paths from both tracing and metrics:
 // Via environment variables
 // OTEL_TRACES_EXCLUDED_PATHS=/health,/healthz,/metrics,/ready
 // OTEL_TRACES_EXCLUDED_PREFIXES=/debug/,/internal/
-// OTEL_TRACES_EXCLUDED_PATTERNS=/api/v*/health
+// OTEL_TRACES_EXCLUDED_PATTERNS=/v1/health,/api/v2/metrics
 
 // Via code
 otelagent.WithRouteExclusions(otelagent.RouteExclusionConfig{
     ExactPaths:  []string{"/health", "/metrics"},     // O(1) map lookup
     PrefixPaths: []string{"/debug/", "/internal/"},   // strings.HasPrefix
-    Patterns:    []string{"/api/v*/health"},           // path.Match glob
+    Patterns:    []string{"/*/health"},                // path.Match glob
 })
 ```
+
+**Default patterns:**
+
+All three layers have built-in defaults so health/readiness probes are excluded out of the box, including versioned paths like `/v1/health` or `/api/v2/health_check`:
+
+| Layer | Default values |
+|---|---|
+| Exact paths | `/health`, `/healthz`, `/health_check`, `/metrics`, `/ready`, `/live` |
+| Prefix paths | (none) |
+| Glob patterns | `/*/health`, `/*/healthz`, `/*/health_check`, `/*/metrics`, `/*/ready`, `/*/live`, `/*/*/health`, `/*/*/healthz`, `/*/*/health_check`, `/*/*/metrics`, `/*/*/ready`, `/*/*/live` |
+
+Glob patterns use Go's `path.Match` where `*` matches a single path segment (not `/`).
 
 ## PII Scrubbing
 
@@ -668,11 +715,13 @@ This library was extracted from a production codebase and fixes these issues:
 | `error_message` as metric attribute — unbounded cardinality | Removed from metrics, kept on spans only |
 | `user_id` as metric attribute — cardinality bomb | Removed from metrics, kept on spans only |
 | Metric instruments recreated on every call | Cached via `sync.Map` |
-| Duplicate HTTP instrumentation (instrumentor + middleware) | Consolidated into single `otelgin`-based middleware |
+| Duplicate HTTP instrumentation (instrumentor + middleware) | Consolidated into single middleware with direct span management |
+| `otelgin` span lifecycle prevents post-handler enrichment | Direct span management: `Start → Next → enrich → End` |
 | FX lifecycle: Gin middleware captures noop TracerProvider | Lazy init via `sync.Once` — resolves real provider on first request |
 | FX lifecycle: GORM plugin captures noop tracer eagerly | Lazy `TracerProvider`/`Tracer` wrappers resolve global provider per query |
 | DB spans orphaned (no HTTP parent) | Both fixes together ensure correct parent-child span linking |
 | DB spans missing query text | GORM plugin includes query variables by default + SQL truncation |
+| DB spans missing database name/user | `WithDBName()` / `WithDBUser()` add `db.namespace` and `db.user` attributes |
 | No HTTP request/response details in spans | Full header, query param, and body capture with PII scrubbing |
 | No error events for HTTP 4xx/5xx | Exception events recorded with status code and error message |
 
