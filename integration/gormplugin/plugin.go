@@ -6,6 +6,7 @@ import (
 
 	otelagent "github.com/RodolfoBonis/go-otel-agent"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/embedded"
 	"gorm.io/gorm"
@@ -36,17 +37,56 @@ func (t *lazyTracer) Start(ctx context.Context, spanName string, opts ...trace.S
 	return otel.GetTracerProvider().Tracer(t.name, t.opts...).Start(ctx, spanName, opts...)
 }
 
+// InstrumentOption configures additional attributes for GORM DB spans.
+type InstrumentOption func(*instrumentConfig)
+
+type instrumentConfig struct {
+	dbName string
+	dbUser string
+}
+
+// WithDBName adds the db.namespace attribute to every DB span.
+func WithDBName(name string) InstrumentOption {
+	return func(cfg *instrumentConfig) {
+		cfg.dbName = name
+	}
+}
+
+// WithDBUser adds the db.user attribute to every DB span.
+func WithDBUser(user string) InstrumentOption {
+	return func(cfg *instrumentConfig) {
+		cfg.dbUser = user
+	}
+}
+
 // Instrument adds OpenTelemetry instrumentation to a GORM database instance.
 // Uses a lazy TracerProvider so spans are linked to the real provider
 // regardless of initialization order.
-func Instrument(db *gorm.DB, agent *otelagent.Agent) error {
+func Instrument(db *gorm.DB, agent *otelagent.Agent, opts ...InstrumentOption) error {
 	if agent == nil || !agent.IsEnabled() || !agent.Config().Features.AutoDatabase {
 		return nil
+	}
+
+	var icfg instrumentConfig
+	for _, opt := range opts {
+		opt(&icfg)
 	}
 
 	pluginOpts := []tracing.Option{
 		tracing.WithTracerProvider(&lazyTracerProvider{}),
 		tracing.WithRecordStackTrace(),
+	}
+
+	// Add db.namespace and db.user as static attributes on every span
+	var staticAttrs []attribute.KeyValue
+	if icfg.dbName != "" {
+		staticAttrs = append(staticAttrs, attribute.String("db.namespace", icfg.dbName))
+	}
+	if icfg.dbUser != "" {
+		staticAttrs = append(staticAttrs, attribute.String("db.user", icfg.dbUser))
+	}
+	if len(staticAttrs) > 0 {
+		pluginOpts = append(pluginOpts, tracing.WithAttributes(staticAttrs...))
 	}
 
 	// Apply SQL truncation when configured

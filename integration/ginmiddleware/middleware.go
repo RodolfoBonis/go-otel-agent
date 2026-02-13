@@ -11,13 +11,15 @@ import (
 	otelagent "github.com/RodolfoBonis/go-otel-agent"
 	"github.com/RodolfoBonis/go-otel-agent/provider"
 	"github.com/gin-gonic/gin"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const scopeName = "github.com/RodolfoBonis/go-otel-agent/integration/ginmiddleware"
 
 // MiddlewareOption configures the Gin middleware.
 type MiddlewareOption func(*middlewareConfig)
@@ -33,9 +35,15 @@ func WithFilter(fn func(*http.Request) bool) MiddlewareOption {
 	}
 }
 
-// New creates a consolidated otelgin-based middleware with custom enrichment.
-// Uses sync.Once for lazy initialization to ensure providers are real (not noop)
-// when running inside FX lifecycle where agent.Init() happens in OnStart.
+// New creates a Gin middleware that manages HTTP spans directly, with full
+// enrichment support. Uses sync.Once for lazy initialization to ensure
+// providers are real (not noop) inside FX lifecycle.
+//
+// Previous versions delegated to otelgin.Middleware, but otelgin's
+// defer span.End() + context restoration made post-handler enrichment
+// a silent no-op. This version owns the full span lifecycle:
+//
+//	tracer.Start → c.Next() → enrichSpan → defer span.End()
 func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) gin.HandlerFunc {
 	if agent == nil || !agent.IsEnabled() {
 		return func(c *gin.Context) { c.Next() }
@@ -48,7 +56,7 @@ func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) g
 
 	var (
 		initOnce       sync.Once
-		otelMiddleware gin.HandlerFunc
+		tracer         trace.Tracer
 		httpDuration   metric.Float64Histogram
 		requestCounter metric.Int64Counter
 		errorCounter   metric.Int64Counter
@@ -57,32 +65,10 @@ func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) g
 
 	lazyInit := func() {
 		initOnce.Do(func() {
-			httpCfg := agent.Config().HTTP
-			scrubCfg := agent.Config().Scrub
-			scrubber = provider.NewHTTPScrubber(httpCfg, scrubCfg)
+			scrubber = provider.NewHTTPScrubber(agent.Config().HTTP, agent.Config().Scrub)
+			tracer = otel.GetTracerProvider().Tracer(scopeName)
 
-			// Combined filter: route matcher + custom filter
-			filterFn := func(r *http.Request) bool {
-				if agent.RouteMatcher().ShouldExclude(r.URL.Path) {
-					return false
-				}
-				if mCfg.customFilter != nil {
-					return mCfg.customFilter(r)
-				}
-				return true
-			}
-
-			// Use otelgin with the real TracerProvider (now initialized)
-			otelMiddleware = otelgin.Middleware(serviceName,
-				otelgin.WithTracerProvider(otel.GetTracerProvider()),
-				otelgin.WithFilter(filterFn),
-				otelgin.WithSpanNameFormatter(func(c *gin.Context) string {
-					return fmt.Sprintf("%s %s", c.Request.Method, c.Request.URL.Path)
-				}),
-			)
-
-			// Create metric instruments from the real MeterProvider
-			meter := agent.GetMeter("github.com/RodolfoBonis/go-otel-agent/integration/ginmiddleware")
+			meter := agent.GetMeter(scopeName)
 			httpDuration, _ = meter.Float64Histogram(
 				"http.server.request.duration",
 				metric.WithDescription("HTTP server request duration"),
@@ -106,11 +92,33 @@ func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) g
 			return
 		}
 
+		// Custom filter
+		if mCfg.customFilter != nil && !mCfg.customFilter(c.Request) {
+			c.Next()
+			return
+		}
+
 		// Lazy init on first request (after agent.Init() has completed)
 		lazyInit()
 
 		httpCfg := agent.Config().HTTP
 		start := time.Now()
+
+		// Extract propagation context from incoming headers (W3C traceparent, baggage)
+		ctx := otel.GetTextMapPropagator().Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
+
+		spanName := fmt.Sprintf("%s %s", c.Request.Method, c.Request.URL.Path)
+
+		// Start span with HTTP semconv request attributes
+		ctx, span := tracer.Start(ctx, spanName,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(requestAttrs(serviceName, c)...),
+		)
+		defer span.End()
+
+		// Propagate trace context into the request so handlers and downstream
+		// instrumentation (GORM, otelhttp clients) use the correct parent span.
+		c.Request = c.Request.WithContext(ctx)
 
 		// Capture request body BEFORE handler runs (if enabled)
 		var reqBody string
@@ -118,7 +126,6 @@ func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) g
 			bodyBytes, err := io.ReadAll(c.Request.Body)
 			if err == nil && len(bodyBytes) > 0 {
 				reqBody = string(bodyBytes)
-				// Restore the body so the handler can read it
 				c.Request.Body = io.NopCloser(strings.NewReader(reqBody))
 			}
 		}
@@ -130,17 +137,38 @@ func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) g
 			c.Writer = blw
 		}
 
-		// Run otelgin middleware (creates HTTP span)
-		otelMiddleware(c)
+		// ---- Run handler chain ----
+		c.Next()
 
+		// ---- Post-handler: span is still open, enrichment works ----
 		duration := time.Since(start)
 		statusCode := c.Writer.Status()
 
-		// Enrich span with additional attributes
-		span := trace.SpanFromContext(c.Request.Context())
-		if span.SpanContext().IsValid() {
-			enrichSpan(c, span, httpCfg, scrubber, reqBody, blw, statusCode)
+		// Response attributes
+		span.SetAttributes(
+			attribute.Int("http.response.status_code", statusCode),
+			attribute.Int("http.response.body.size", c.Writer.Size()),
+		)
+
+		if route := c.FullPath(); route != "" {
+			span.SetAttributes(attribute.String("http.route", route))
+			// Update span name to use the registered route pattern
+			span.SetName(fmt.Sprintf("%s %s", c.Request.Method, route))
 		}
+
+		// Span status
+		if statusCode >= 500 {
+			span.SetStatus(codes.Error, "")
+		}
+		if len(c.Errors) > 0 {
+			span.SetStatus(codes.Error, c.Errors.String())
+			for _, err := range c.Errors {
+				span.RecordError(err.Err)
+			}
+		}
+
+		// Custom enrichment: headers, body, query params, user context
+		enrichSpan(c, span, httpCfg, scrubber, reqBody, blw, statusCode)
 
 		// Record metrics (bounded cardinality)
 		route := c.FullPath()
@@ -164,6 +192,39 @@ func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) g
 			errorCounter.Add(c.Request.Context(), 1, metric.WithAttributes(metricAttrs...))
 		}
 	}
+}
+
+// requestAttrs returns HTTP semconv request attributes for the span start.
+func requestAttrs(server string, c *gin.Context) []attribute.KeyValue {
+	req := c.Request
+	scheme := "http"
+	if req.TLS != nil {
+		scheme = "https"
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("http.request.method", req.Method),
+		attribute.String("url.scheme", scheme),
+		attribute.String("server.address", server),
+	}
+
+	if req.URL != nil && req.URL.Path != "" {
+		attrs = append(attrs, attribute.String("url.path", req.URL.Path))
+	}
+
+	if clientIP := c.ClientIP(); clientIP != "" {
+		attrs = append(attrs, attribute.String("client.address", clientIP))
+	}
+
+	if ua := req.UserAgent(); ua != "" {
+		attrs = append(attrs, attribute.String("user_agent.original", ua))
+	}
+
+	if req.ContentLength > 0 {
+		attrs = append(attrs, attribute.Int64("http.request.content_length", req.ContentLength))
+	}
+
+	return attrs
 }
 
 // enrichSpan adds HTTP headers, query params, body, user context, and error events to the span.
@@ -228,11 +289,7 @@ func enrichSpan(c *gin.Context, span trace.Span, httpCfg otelagent.HTTPConfig, s
 	// Trace ID response header for debugging
 	c.Header("X-Trace-Id", span.SpanContext().TraceID().String())
 
-	// Span status and error events
-	if statusCode >= 500 {
-		span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))
-	}
-
+	// Exception events for 4xx/5xx
 	if httpCfg.RecordExceptionEvents && statusCode >= 400 {
 		errMsg := http.StatusText(statusCode)
 		if len(c.Errors) > 0 {
