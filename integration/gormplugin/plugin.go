@@ -39,9 +39,9 @@ func (t *lazyTracer) Start(ctx context.Context, spanName string, opts ...trace.S
 	return trace.ContextWithSpan(ctx, bridged), bridged
 }
 
-// dbSemconvBridgeSpan intercepts SetAttributes to duplicate db.query.text
-// (new semconv emitted by GORM plugin v0.1.16) as db.statement (legacy
-// semconv that SigNoz uses for displaying SQL queries).
+// dbSemconvBridgeSpan intercepts SetAttributes to duplicate new semconv
+// attributes (emitted by GORM plugin v0.1.16) as legacy equivalents that
+// SigNoz uses for DB Call Metrics and SQL display.
 type dbSemconvBridgeSpan struct {
 	trace.Span
 }
@@ -49,8 +49,19 @@ type dbSemconvBridgeSpan struct {
 func (s *dbSemconvBridgeSpan) SetAttributes(attrs ...attribute.KeyValue) {
 	var extra []attribute.KeyValue
 	for _, a := range attrs {
-		if a.Key == "db.query.text" {
+		switch a.Key {
+		case "db.query.text":
 			extra = append(extra, attribute.String("db.statement", a.Value.AsString()))
+		case "db.system.name":
+			extra = append(extra, attribute.String("db.system", a.Value.AsString()))
+		case "db.operation.name":
+			extra = append(extra, attribute.String("db.operation", a.Value.AsString()))
+		case "db.collection.name":
+			extra = append(extra, attribute.String("db.sql.table", a.Value.AsString()))
+		case "server.address":
+			extra = append(extra, attribute.String("net.peer.name", a.Value.AsString()))
+		case "db.namespace":
+			extra = append(extra, attribute.String("db.name", a.Value.AsString()))
 		}
 	}
 	if len(extra) > 0 {

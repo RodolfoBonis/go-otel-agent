@@ -63,6 +63,7 @@ type DiagnosticsInfo struct {
 	Endpoint     string  `json:"endpoint"`
 	SamplingRate float64 `json:"sampling_rate"`
 	TracerType   string  `json:"tracer_type"`
+	LoggerType   string  `json:"logger_type"`
 	Features     any     `json:"features"`
 }
 
@@ -71,6 +72,11 @@ func (a *Agent) Diagnostics() DiagnosticsInfo {
 	tracerType := "noop"
 	if a.tracerProvider != nil {
 		tracerType = fmt.Sprintf("%T", a.tracerProvider)
+	}
+
+	loggerType := "noop"
+	if a.loggerProvider != nil {
+		loggerType = fmt.Sprintf("%T", a.loggerProvider)
 	}
 
 	return DiagnosticsInfo{
@@ -83,6 +89,7 @@ func (a *Agent) Diagnostics() DiagnosticsInfo {
 		Endpoint:     a.config.Endpoint,
 		SamplingRate: a.config.Traces.Sampling.Rate,
 		TracerType:   tracerType,
+		LoggerType:   loggerType,
 		Features:     a.config.Features,
 	}
 }

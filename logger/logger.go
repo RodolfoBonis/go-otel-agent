@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 
+	"go.opentelemetry.io/contrib/bridges/otelzap"
+	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -71,6 +73,19 @@ func NewLogger(environment string) Logger {
 	return &CustomLogger{logger: zapLogger}
 }
 
+// EnableOTelBridge adds an OTel log bridge core so zap entries are
+// also exported as OTel log records via OTLP.
+func (cl *CustomLogger) EnableOTelBridge(provider otellog.LoggerProvider) {
+	otelCore := otelzap.NewCore("go-otel-agent",
+		otelzap.WithLoggerProvider(provider),
+	)
+	cl.logger = cl.logger.WithOptions(
+		zap.WrapCore(func(existing zapcore.Core) zapcore.Core {
+			return zapcore.NewTee(existing, otelCore)
+		}),
+	)
+}
+
 func (cl *CustomLogger) Debug(ctx context.Context, message string, fields ...Fields) {
 	cl.logger.Debug(message, cl.zapFields(ctx, fields...)...)
 }
@@ -135,7 +150,16 @@ func (cl *CustomLogger) zapFields(ctx context.Context, fields ...Fields) []zap.F
 		}
 	}
 
-	return cl.fieldsToZap(allFields)
+	zfs := cl.fieldsToZap(allFields)
+
+	// Pass context to otelzap bridge for native OTel trace correlation.
+	// SkipType is invisible to stdout (AddTo is no-op) but otelzap checks
+	// field.Interface for context.Context before AddTo.
+	if ctx != nil {
+		zfs = append(zfs, zap.Field{Key: "", Type: zapcore.SkipType, Interface: ctx})
+	}
+
+	return zfs
 }
 
 func (cl *CustomLogger) fieldsToZap(fields Fields) []zap.Field {
