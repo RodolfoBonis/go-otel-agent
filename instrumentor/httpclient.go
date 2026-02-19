@@ -9,26 +9,27 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// NewOTelTransport returns an instrumented http.RoundTripper with legacy semconv
+// attributes (net.peer.name, http.url, http.method, http.status_code) that
+// SigNoz uses for External Call dashboard hostname grouping.
+func NewOTelTransport(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return otelhttp.NewTransport(
+		&legacySemconvTransport{base: base},
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return fmt.Sprintf("HTTP %s %s", r.Method, r.URL.Host)
+		}),
+	)
+}
+
 // InstrumentHTTPClient wraps an HTTP client's transport with OTel instrumentation.
 func InstrumentHTTPClient(client *http.Client) *http.Client {
 	if client == nil {
 		client = &http.Client{}
 	}
-
-	transport := client.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-
-	// legacySemconvTransport is the inner transport: otelhttp wraps it,
-	// so by the time RoundTrip runs, the span is already in req.Context().
-	client.Transport = otelhttp.NewTransport(
-		&legacySemconvTransport{base: transport},
-		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
-			return fmt.Sprintf("HTTP %s %s", r.Method, r.URL.Host)
-		}),
-	)
-
+	client.Transport = NewOTelTransport(client.Transport)
 	return client
 }
 

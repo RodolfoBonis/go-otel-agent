@@ -13,8 +13,11 @@ import (
 	"github.com/RodolfoBonis/go-otel-agent/logger"
 	"github.com/RodolfoBonis/go-otel-agent/provider"
 	"go.opentelemetry.io/otel"
+	otellog "go.opentelemetry.io/otel/log"
+	logglobal "go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -41,6 +44,7 @@ type Agent struct {
 	// Providers (SDK types, unexported)
 	tracerProvider *sdktrace.TracerProvider
 	meterProvider  *sdkmetric.MeterProvider
+	loggerProvider *sdklog.LoggerProvider
 
 	// Cached tracers/meters
 	tracers sync.Map // name -> trace.Tracer
@@ -136,9 +140,18 @@ func (a *Agent) Init(ctx context.Context) error {
 
 	// Initialize log provider
 	if a.config.Logs.Enabled {
-		_, err = provider.NewLogProvider(a.config, res, a.logger)
+		a.loggerProvider, err = provider.NewLogProvider(a.config, res, a.logger)
 		if err != nil {
 			return fmt.Errorf("failed to create log provider: %w", err)
+		}
+		logglobal.SetLoggerProvider(a.loggerProvider)
+
+		// Bridge zap logger to OTel LoggerProvider so log entries
+		// are exported via OTLP alongside traces and metrics.
+		if bridgeable, ok := a.logger.(interface {
+			EnableOTelBridge(otellog.LoggerProvider)
+		}); ok {
+			bridgeable.EnableOTelBridge(a.loggerProvider)
 		}
 	}
 
@@ -254,6 +267,12 @@ func (a *Agent) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	if a.loggerProvider != nil {
+		if err := a.loggerProvider.Shutdown(shutdownCtx); err != nil {
+			a.logger.Error(ctx, "Failed to shutdown log provider", logger.Fields{"error": err.Error()})
+		}
+	}
+
 	a.running = false
 	a.logger.Info(ctx, "Observability agent shut down")
 	return nil
@@ -277,6 +296,12 @@ func (a *Agent) ForceFlush(ctx context.Context) error {
 	if a.meterProvider != nil {
 		if err := a.meterProvider.ForceFlush(ctx); err != nil {
 			return fmt.Errorf("metric flush: %w", err)
+		}
+	}
+
+	if a.loggerProvider != nil {
+		if err := a.loggerProvider.ForceFlush(ctx); err != nil {
+			return fmt.Errorf("log flush: %w", err)
 		}
 	}
 
@@ -355,6 +380,12 @@ func (a *Agent) TracerProvider() trace.TracerProvider {
 		return nooptrace.NewTracerProvider()
 	}
 	return a.tracerProvider
+}
+
+// LoggerProvider returns the underlying sdklog.LoggerProvider.
+// Returns nil if logs are disabled or not initialized.
+func (a *Agent) LoggerProvider() *sdklog.LoggerProvider {
+	return a.loggerProvider
 }
 
 // IsRunning returns whether the agent is currently running.

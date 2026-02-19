@@ -33,15 +33,16 @@ func NewTraceProvider(cfg *config.Config, res *resource.Resource, log logger.Log
 		sdktrace.WithSampler(createSampler(cfg.Traces.Sampling)),
 	}
 
-	// Wire span limits (fix: was configured but never applied)
+	// Wire span limits using NewSpanLimits() as base to preserve safe defaults
+	// (e.g. AttributeValueLengthLimit=-1 means unlimited; a zero value would
+	// truncate every string attribute to empty).
 	if cfg.Traces.MaxAttributesPerSpan > 0 || cfg.Traces.MaxEventsPerSpan > 0 || cfg.Traces.MaxLinksPerSpan > 0 {
-		limits := sdktrace.SpanLimits{
-			AttributeCountLimit:         cfg.Traces.MaxAttributesPerSpan,
-			EventCountLimit:             cfg.Traces.MaxEventsPerSpan,
-			LinkCountLimit:              cfg.Traces.MaxLinksPerSpan,
-			AttributePerEventCountLimit: cfg.Traces.MaxAttributesPerSpan,
-			AttributePerLinkCountLimit:  cfg.Traces.MaxAttributesPerSpan,
-		}
+		limits := sdktrace.NewSpanLimits()
+		limits.AttributeCountLimit = cfg.Traces.MaxAttributesPerSpan
+		limits.EventCountLimit = cfg.Traces.MaxEventsPerSpan
+		limits.LinkCountLimit = cfg.Traces.MaxLinksPerSpan
+		limits.AttributePerEventCountLimit = cfg.Traces.MaxAttributesPerSpan
+		limits.AttributePerLinkCountLimit = cfg.Traces.MaxAttributesPerSpan
 		opts = append(opts, sdktrace.WithRawSpanLimits(limits))
 	}
 
