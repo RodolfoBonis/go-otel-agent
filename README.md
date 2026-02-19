@@ -26,7 +26,8 @@ Built for [SigNoz](https://signoz.io), but works with any OpenTelemetry-compatib
 - **SigNoz Cloud support** — Auth headers and TLS configuration for secured collectors
 - **Graceful degradation** — Exporter health tracking (healthy/degraded/unhealthy)
 - **HTTP client instrumentation** — Automatic tracing for outgoing HTTP requests with legacy semconv bridge for SigNoz External Call dashboard
-- **SigNoz semconv bridge** — Automatic `db.query.text` → `db.statement` duplication for SigNoz DB query visibility
+- **OTel log bridge** — Automatic zap-to-OTLP export via otelzap with native TraceID/SpanID correlation (Logs<->Traces linking)
+- **SigNoz semconv bridge** — Full new-to-legacy attribute bridge for DB queries (`db.statement`, `db.system`, `db.operation`, `db.sql.table`, `net.peer.name`, `db.name`) and HTTP external calls
 - **Diagnostics endpoint** — Runtime config inspection for debugging telemetry issues
 
 ## Installation
@@ -161,7 +162,7 @@ go-otel-agent/
 ├── config/
 │   └── types.go                    # All configuration struct definitions
 ├── logger/
-│   ├── logger.go                   # Zap-based logger with auto trace correlation
+│   ├── logger.go                   # Zap-based logger with auto trace correlation + OTel log bridge
 │   └── noop.go                     # NoopLogger for testing
 ├── provider/
 │   ├── resource.go                 # OTel Resource builder
@@ -187,7 +188,7 @@ go-otel-agent/
 ├── instrumentor/
 │   ├── instrumentor.go             # Function tracing via reflection
 │   ├── propagation.go              # W3C trace context propagation
-│   └── httpclient.go               # HTTP client instrumentation with legacy semconv bridge
+│   └── httpclient.go               # NewOTelTransport + InstrumentHTTPClient with legacy semconv bridge
 ├── internal/
 │   └── matcher/
 │       └── route.go                # Three-layer route exclusion matcher
@@ -197,7 +198,7 @@ go-otel-agent/
 │   │   ├── health.go               # Health/readiness/diagnostics Gin handlers
 │   │   └── body.go                 # Response body capture
 │   ├── gormplugin/
-│   │   └── plugin.go               # GORM with lazy TracerProvider, db.namespace/db.user, SQL truncation, semconv bridge
+│   │   └── plugin.go               # GORM with lazy TracerProvider, db.namespace/db.user, SQL truncation, full semconv bridge
 │   ├── redisplugin/
 │   │   └── plugin.go               # Redis auto-instrumentation
 │   └── amqpplugin/
@@ -440,6 +441,8 @@ orderLog := log.With(logger.Fields{"order_id": orderID})
 orderLog.Info(ctx, "Processing order")
 ```
 
+**OTel log bridge:** When `OTEL_LOGS_ENABLED=true`, the agent automatically bridges zap to the OTel LoggerProvider via [otelzap](https://pkg.go.dev/go.opentelemetry.io/contrib/bridges/otelzap). All log entries are exported via OTLP alongside traces and metrics. The bridge also sets native TraceID/SpanID on log records (via `context.Context` passed as a `zapcore.SkipType` field), enabling automatic Logs<->Traces linking in SigNoz and other backends. No code changes needed — `agent.Init()` sets it up automatically.
+
 ### Baggage
 
 ```go
@@ -545,18 +548,23 @@ gormplugin.Instrument(db, agent,
 | Attribute | Source |
 |---|---|
 | `db.query.text` | Full SQL query text (new semconv) |
-| `db.statement` | Full SQL query text (legacy semconv, auto-bridged from `db.query.text`) |
-| `db.operation.name` | SQL operation (SELECT, INSERT, etc.) |
-| `db.collection.name` | Table name |
+| `db.statement` | Full SQL query text (legacy, auto-bridged from `db.query.text`) |
+| `db.system.name` | Database system (new semconv, e.g., `postgresql`) |
+| `db.system` | Database system (legacy, auto-bridged from `db.system.name`) |
+| `db.operation.name` | SQL operation (new semconv, e.g., SELECT, INSERT) |
+| `db.operation` | SQL operation (legacy, auto-bridged from `db.operation.name`) |
+| `db.collection.name` | Table name (new semconv) |
+| `db.sql.table` | Table name (legacy, auto-bridged from `db.collection.name`) |
+| `server.address` | Database host (new semconv) |
+| `net.peer.name` | Database host (legacy, auto-bridged from `server.address`) |
+| `db.namespace` | Database name (new semconv, via `WithDBName`) |
+| `db.name` | Database name (legacy, auto-bridged from `db.namespace`) |
 | `db.rows_affected` | Number of rows affected |
-| `server.address` | Database host |
-| `db.system.name` | Database system (e.g., `postgresql`) |
-| `db.namespace` | Database name (via `WithDBName`) |
 | `db.user` | Database user (via `WithDBUser`) |
 
 The GORM plugin uses a **lazy TracerProvider** that resolves the real global TracerProvider on every query. This solves the FX lifecycle issue where `gormplugin.Instrument()` is called during `fx.Invoke` before `agent.Init()` sets the global provider.
 
-**Semconv bridge:** The GORM OTel plugin v0.1.16 emits `db.query.text` (new semconv), but SigNoz displays `db.statement` (legacy semconv). The bridge span wrapper automatically duplicates `db.query.text` as `db.statement` so SQL queries are visible in both old and new SigNoz versions.
+**Semconv bridge:** The GORM OTel plugin v0.1.16 emits new semconv attributes, but SigNoz uses legacy semconv for DB Call Metrics and SQL display. The bridge span wrapper automatically duplicates all 6 attributes (query text, system, operation, table, host, database name) to their legacy equivalents.
 
 DB spans appear as children of HTTP spans, creating a complete trace: `HTTP GET /api/v1/plans` -> `SELECT plans`.
 
@@ -592,8 +600,14 @@ ctx = amqpplugin.ExtractTraceContext(context.Background(), msg.Headers, agent)
 ```go
 import "github.com/RodolfoBonis/go-otel-agent/instrumentor"
 
+// Option 1: Wrap an existing http.Client (mutates transport in-place)
 client := &http.Client{}
-instrumentor.InstrumentHTTPClient(client) // Wraps transport with otelhttp
+instrumentor.InstrumentHTTPClient(client)
+
+// Option 2: Use the transport directly (e.g., for custom clients or middleware chains)
+client := &http.Client{
+    Transport: instrumentor.NewOTelTransport(http.DefaultTransport),
+}
 
 resp, err := client.Get("https://api.example.com/data")
 // Outgoing request is automatically traced with span: "HTTP GET api.example.com"
@@ -615,7 +629,8 @@ ready := agent.ReadinessCheck() // true when initialized and running
 diag := agent.Diagnostics()
 // DiagnosticsInfo{Enabled: true, Running: true, Environment: "staging",
 //   ServiceName: "my-api", Endpoint: "signoz:4317", SamplingRate: 0.5,
-//   TracerType: "*trace.TracerProvider", Features: {...}}
+//   TracerType: "*trace.TracerProvider", LoggerType: "*log.LoggerProvider",
+//   Features: {...}}
 
 // Gin handlers
 r.GET("/health", ginmiddleware.HealthHandler(agent))
@@ -725,7 +740,7 @@ This library was extracted from a production codebase and fixes these issues:
 | `GetMeter()` returns nil when disabled — panics consumers | Returns noop meter, never nil |
 | `getStringEnv()` default value logic broken | Redesigned: `getStringEnv(defaultValue, keys...)` |
 | `ratio` sampler not wrapped in `ParentBased` | Always wrapped in `ParentBased` for correct distributed tracing |
-| Span limits configured but never applied | Wired to `sdktrace.WithSpanLimits()` |
+| Span limits configured but never applied | Wired to `sdktrace.WithRawSpanLimits()` using `NewSpanLimits()` as base (avoids zero-value truncation) |
 | Retry config configured but never wired | Wired to `WithRetry()` on all OTLP exporters |
 | `error_message` as metric attribute — unbounded cardinality | Removed from metrics, kept on spans only |
 | `user_id` as metric attribute — cardinality bomb | Removed from metrics, kept on spans only |
@@ -737,12 +752,16 @@ This library was extracted from a production codebase and fixes these issues:
 | DB spans orphaned (no HTTP parent) | Both fixes together ensure correct parent-child span linking |
 | DB spans missing query text | GORM plugin includes query variables by default + SQL truncation |
 | DB spans missing database name/user | `WithDBName()` / `WithDBUser()` add `db.namespace` and `db.user` attributes |
-| DB queries not visible in SigNoz (new semconv) | Semconv bridge duplicates `db.query.text` as `db.statement` for SigNoz |
+| DB queries not visible in SigNoz (new semconv) | Full semconv bridge duplicates all 6 DB attributes to legacy equivalents |
 | DB truncation logic was dead code (inside `isSensitive()`) | Extracted as independent concern, handles both `db.statement` and `db.query.text` |
 | SigNoz External Call shows generic labels (A, F1) | Legacy semconv transport injects `net.peer.name`, `http.url`, `http.method` |
 | No HTTP request/response details in spans | Full header, query param, and body capture with PII scrubbing |
 | No error events for HTTP 4xx/5xx | Exception events recorded with status code and error message |
 | No runtime config inspection for debugging | `Diagnostics()` method and `DiagnosticsHandler` expose config at runtime |
+| Log provider not stored — shutdown/flush leaked | LoggerProvider stored on Agent with proper Shutdown/ForceFlush lifecycle |
+| Logs not exported via OTLP | otelzap bridge auto-enabled when `OTEL_LOGS_ENABLED=true` |
+| No native trace correlation on logs (only string attributes) | `context.Context` passed via `zapcore.SkipType` field for native TraceID/SpanID on log records |
+| `WithRawSpanLimits(SpanLimits{})` truncates all string attributes to empty | Uses `NewSpanLimits()` as base (sets `AttributeValueLengthLimit=-1` unlimited) |
 
 ## Examples
 
