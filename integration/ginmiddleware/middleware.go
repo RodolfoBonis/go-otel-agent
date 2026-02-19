@@ -1,6 +1,7 @@
 package ginmiddleware
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	otelagent "github.com/RodolfoBonis/go-otel-agent"
+	"github.com/RodolfoBonis/go-otel-agent/logger"
 	"github.com/RodolfoBonis/go-otel-agent/provider"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel"
@@ -66,7 +68,16 @@ func New(agent *otelagent.Agent, serviceName string, opts ...MiddlewareOption) g
 	lazyInit := func() {
 		initOnce.Do(func() {
 			scrubber = provider.NewHTTPScrubber(agent.Config().HTTP, agent.Config().Scrub)
-			tracer = otel.GetTracerProvider().Tracer(scopeName)
+
+			tp := otel.GetTracerProvider()
+			tracer = tp.Tracer(scopeName)
+
+			agent.Logger().Debug(context.Background(), "ginmiddleware lazy init", logger.Fields{
+				"tracer_provider_type": fmt.Sprintf("%T", tp),
+				"service":              serviceName,
+				"sampling_rate":        agent.Config().Traces.Sampling.Rate,
+				"endpoint":             agent.Config().Endpoint,
+			})
 
 			meter := agent.GetMeter(scopeName)
 			httpDuration, _ = meter.Float64Histogram(
